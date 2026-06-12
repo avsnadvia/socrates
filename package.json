@@ -1,0 +1,19 @@
+{
+  "name": "socrates",
+  "version": "1.0.0",
+  "description": "Socrates - Conselheiro multiusuario via WhatsApp (Evolution API + Claude + Supabase)",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
