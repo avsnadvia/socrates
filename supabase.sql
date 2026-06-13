@@ -10,13 +10,15 @@ create table if not exists socrates_usuarios (
   nome text,                          -- preenchido por você ou no onboarding
   admin boolean not null default false,
   modo text not null default 'normal' check (modo in ('normal', 'profundo')),
-  recebe_copa boolean not null default true,      -- Giro da Copa (opt-out)
+  caracteristica text,                            -- nota do Rodrigo sobre quem é a pessoa
+  recebe_copa boolean not null default true,      -- Resenha do Doutor (opt-out)
   recebe_noticias boolean not null default false, -- notícias gerais (opt-in)
   criado_em timestamptz not null default now()
 );
 
 -- MIGRAÇÃO: se você JÁ rodou a versão anterior deste SQL, rode também estas linhas:
 alter table socrates_usuarios add column if not exists recebe_copa boolean not null default true;
+alter table socrates_usuarios add column if not exists caracteristica text;
 alter table socrates_usuarios alter column recebe_noticias set default false;
 
 -- 2. Histórico de mensagens (por usuário)

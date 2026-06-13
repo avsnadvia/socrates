@@ -1,7 +1,7 @@
 // src/whatsapp.js — envio de mensagens via Evolution API
 const EVOLUTION_URL = process.env.EVOLUTION_URL;
 const EVOLUTION_APIKEY = process.env.EVOLUTION_APIKEY;
-const INSTANCE = process.env.EVOLUTION_INSTANCE || 'tobias';
+const INSTANCE = process.env.EVOLUTION_INSTANCE || 'socrates';
 
 export async function enviarMensagem(numero, texto) {
   try {
