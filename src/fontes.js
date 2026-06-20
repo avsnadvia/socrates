@@ -6,14 +6,21 @@
 // Códigos úteis de competição: WC (Copa do Mundo), CL (Champions),
 // BSA (Brasileirão), PL (Premier League), PD (La Liga), SA (Serie A),
 // BL1 (Bundesliga), FL1 (Ligue 1), EC (Eurocopa).
-export async function consultarFutebol({ tipo, competicao, status }) {
+export async function consultarFutebol({ tipo, competicao, status, dataInicio, dataFim }) {
   const key = process.env.FOOTBALL_DATA_KEY;
   if (!key) return 'Fonte de futebol não configurada.';
   const base = 'https://api.football-data.org/v4';
-  const url =
-    tipo === 'tabela'
-      ? `${base}/competitions/${competicao}/standings`
-      : `${base}/competitions/${competicao}/matches${status ? `?status=${status}` : ''}`;
+  let url;
+  if (tipo === 'tabela') {
+    url = `${base}/competitions/${competicao}/standings`;
+  } else {
+    const q = new URLSearchParams();
+    if (status) q.set('status', status);
+    if (dataInicio) q.set('dateFrom', dataInicio); // formato YYYY-MM-DD
+    if (dataFim) q.set('dateTo', dataFim);          // formato YYYY-MM-DD
+    const qs = q.toString();
+    url = `${base}/competitions/${competicao}/matches${qs ? `?${qs}` : ''}`;
+  }
   try {
     const r = await fetch(url, { headers: { 'X-Auth-Token': key } });
     if (!r.ok) return `Não consegui consultar o futebol agora (HTTP ${r.status}).`;
@@ -34,7 +41,7 @@ function resumirJogos(data) {
     const g2 = m.score?.fullTime?.away;
     const placar = g1 != null && g2 != null ? `${g1}x${g2}` : 'x';
     const quando = m.utcDate
-      ? new Date(m.utcDate).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      ? new Date(m.utcDate).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
       : '';
     const st = { SCHEDULED: 'agendado', TIMED: 'agendado', LIVE: 'AO VIVO', IN_PLAY: 'AO VIVO', PAUSED: 'intervalo', FINISHED: 'encerrado' }[m.status] || m.status;
     return `- ${casa} ${placar} ${fora} (${st}, ${quando})`;
@@ -113,13 +120,15 @@ function descricaoTempo(code) {
 const DEF_FUTEBOL = {
   name: 'futebol',
   description:
-    'Consulta dados REAIS de futebol (placares, classificação/tabela, jogos agendados) via football-data.org. Use para resultados, tabela de grupos da Copa do Mundo, próximos jogos. Prefira esta ferramenta à busca web para placar e tabela.',
+    'Consulta dados REAIS de futebol (placares, classificação/tabela, jogos agendados) via football-data.org. SEMPRE use esta ferramenta para placar e tabela — nunca chute de memória nem confie só na busca web. IMPORTANTE: para "jogos de ontem/hoje" ou uma data específica, informe dataInicio e dataFim com a data desejada (YYYY-MM-DD). NÃO use só o status, pois ele devolve jogos de TODAS as rodadas misturados, levando a erros de data.',
   input_schema: {
     type: 'object',
     properties: {
       tipo: { type: 'string', enum: ['jogos', 'tabela'], description: 'jogos = partidas (placar/agenda); tabela = classificação' },
       competicao: { type: 'string', description: 'Código: WC (Copa do Mundo), CL (Champions), BSA (Brasileirão), PL, PD (La Liga), SA, BL1, FL1, EC' },
       status: { type: 'string', description: 'Opcional, só para jogos: SCHEDULED, LIVE, FINISHED' },
+      dataInicio: { type: 'string', description: 'Opcional, filtra jogos a partir desta data (YYYY-MM-DD). Use a data de hoje (fonte da verdade no contexto) para calcular "ontem"/"hoje".' },
+      dataFim: { type: 'string', description: 'Opcional, filtra jogos até esta data (YYYY-MM-DD). Para um único dia, use a mesma data em dataInicio e dataFim.' },
     },
     required: ['tipo', 'competicao'],
   },

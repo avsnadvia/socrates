@@ -227,7 +227,7 @@ export async function gerarResenhaDoDoutor() {
   const blocoSel = `Seleções que o círculo acompanha — dê PRIORIDADE a elas: Nível 1 (sagrado): ${porNivel[1].join(', ')}; Nível 2: ${porNivel[2].join(', ')}; Nível 3: ${porNivel[3].join(', ')}.`;
 
   return gerarDifusao(
-    `Hoje é ${hoje} e estamos na Copa do Mundo 2026. Busque dados REAIS (use a ferramenta de futebol para placar e tabela da Copa — código WC — e a busca web para o resto): (1) resultados de ontem, (2) jogos de HOJE com horário de Brasília, (3) os CRAQUES em destaque — consagrados e REVELAÇÕES. ${blocoSel}
+    `Hoje é ${hoje} e estamos na Copa do Mundo 2026. Busque dados REAIS com a ferramenta de futebol (código WC), SEMPRE filtrando por data (dataInicio/dataFim) para não misturar rodadas: (1) resultados de ONTEM — chame a ferramenta com a data de ontem; (2) jogos de HOJE com horário de Brasília — chame com a data de hoje; (3) os CRAQUES em destaque — consagrados e REVELAÇÕES (aqui pode usar a busca web). Confira a data de cada jogo antes de comentar; jamais junte jogos de dias diferentes. ${blocoSel}
 
 Escreva a "Resenha do Doutor", começando com a linha: ⚽ *Resenha do Doutor* — e a data por extenso. Depois o comentário com SUA personalidade: análise de quem entende de bola, ironia fina, memória das Copas antigas, carinho com a Seleção. Inclua um "anota esse nome aí" destacando 1-2 craques/revelações. Saudação coletiva VARIADA (nunca um nome específico). Formato WhatsApp, máx ~1700 caracteres. Feche com palpite OU provocação — técnico ou apaixonado, deixando claro de qual lado fala.`,
     'resenha',

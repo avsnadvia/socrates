@@ -351,4 +351,4 @@ if (CRON_CUSTO !== 'off') {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sócrates v4.5.0 rodando na porta ${PORT} ⚽`));
+app.listen(PORT, () => console.log(`Sócrates v4.6.0 rodando na porta ${PORT} ⚽`));
