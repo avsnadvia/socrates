@@ -1,4 +1,9 @@
 // src/index.js — Sócrates v4: multiusuário, comandos, resenha, jogo, bolão, painel, custo
+
+// Rede de segurança: nenhum erro solto (ex: stream que escapa) pode derrubar o processo.
+process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e?.message || e));
+process.on('uncaughtException', (e) => console.error('uncaughtException:', e?.message || e));
+
 import express from 'express';
 import cron from 'node-cron';
 import {
@@ -212,9 +217,14 @@ async function tratarComando(usuario, texto) {
     if (t === '/jogo-prejogo' || t === '/jogo-intervalo' || t === '/jogo-posjogo') {
       const momento = t.replace('/jogo-', '');
       await enviarMensagem(usuario.numero, '⚽ Preparando o comentário e buscando os dados do jogo... já disparo pra galera.');
-      const texto = await gerarComentarioJogo(momento);
-      const n = await difundir(texto, 'recebe_copa');
-      return `✅ Comentário de ${momento} enviado para ${n} pessoas.`;
+      try {
+        const texto = await gerarComentarioJogo(momento);
+        const n = await difundir(texto, 'recebe_copa');
+        return `✅ Comentário de ${momento} enviado para ${n} pessoas.`;
+      } catch (e) {
+        console.error('Falha no comentário de jogo:', e?.message || e);
+        return '⚠️ Não consegui gerar o comentário agora (a API do Claude está oscilando). Tenta de novo em alguns minutos.';
+      }
     }
   }
 
@@ -259,7 +269,17 @@ app.post('/webhook', (req, res) => {
     const totalMensagens = await contarMensagens(usuario.id);
     await salvarMensagem(usuario.id, 'user', texto);
     const historico = await buscarHistorico(usuario.id, 30);
-    const resposta = await responder(usuario, historico, totalMensagens);
+    let resposta;
+    try {
+      resposta = await responder(usuario, historico, totalMensagens);
+    } catch (e) {
+      console.error('Falha ao gerar resposta:', e?.message || e);
+      await enviarMensagem(
+        numero,
+        '⚽ Opa, deu uma travada na minha conexão aqui — meu cérebro tá oscilando neste instante. Manda de novo daqui a pouquinho que eu te respondo, combinado?'
+      );
+      return;
+    }
     await salvarMensagem(usuario.id, 'assistant', resposta);
     await marcarConversa(usuario.id);
     await enviarMensagem(numero, resposta);
@@ -331,4 +351,4 @@ if (CRON_CUSTO !== 'off') {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sócrates rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Sócrates v4.5.0 rodando na porta ${PORT} ⚽`));

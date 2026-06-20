@@ -1,6 +1,11 @@
-// src/claude.js — v4: cérebro do Sócrates
+// src/claude.js — v4.1: cérebro do Sócrates
 // caching + modo normal/profundo + memória de narrativa + custo +
-// resenha turbinada (craques/seleções) + comentários de jogo.
+// resenha turbinada + comentários de jogo + FONTES EXTERNAS (futebol/notícias/clima).
+// IMPORTANTE: força o uso do fetch NATIVO do Node (undici) em vez do node-fetch.
+// O node-fetch tem um bug em que "Premature close" escapa do try/catch e derruba o
+// processo. Com o fetch nativo, o erro vira rejeição normal — capturável pelo retry
+// e pelo plano B. Este import precisa vir ANTES do import do SDK.
+import '@anthropic-ai/sdk/shims/web';
 import Anthropic from '@anthropic-ai/sdk';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -13,19 +18,56 @@ import {
   listarSelecoes,
   registrarUso,
 } from './dados.js';
+import { ferramentasCustom, executarFerramenta } from './fontes.js';
+import { temFallback, responderFallback } from './fallback.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SISTEMA_BASE = readFileSync(
-  join(__dirname, '..', 'prompts', 'sistema.md'),
-  'utf-8'
-);
+const SISTEMA_BASE = readFileSync(join(__dirname, '..', 'prompts', 'sistema.md'), 'utf-8');
 
 const MODELO_NORMAL = process.env.MODELO_NORMAL || 'claude-sonnet-4-6';
 const MODELO_PROFUNDO = process.env.MODELO_PROFUNDO || 'claude-opus-4-8';
 
-// Extrai [MEMORIA:cat] da resposta (privado por padrão), salva, devolve texto limpo.
+const SERVER_TOOLS = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }];
+
+// Modelo de emergência: estável e barato, para quando o principal estiver oscilando.
+const MODELO_FALLBACK = process.env.MODELO_FALLBACK || 'claude-sonnet-4-6';
+
+// Detecta erros transitórios (queda de conexão, sobrecarga, timeout da API).
+function ehErroTransiente(err) {
+  const code = err?.code || err?.cause?.code || '';
+  const status = err?.status;
+  if (['ERR_STREAM_PREMATURE_CLOSE', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
+  if ([408, 409, 429, 500, 502, 503, 529].includes(status)) return true;
+  const msg = (err?.message || '').toLowerCase();
+  return msg.includes('premature close') || msg.includes('overloaded') || msg.includes('timeout') || msg.includes('connection');
+}
+
+// Chama a API com tentativas repetidas e, se o modelo principal insistir em falhar,
+// tenta automaticamente no modelo de fallback (desvia de incidentes do Opus).
+async function criarComRetry(params, tentativas = 3) {
+  const modelos = params.model && params.model !== MODELO_FALLBACK
+    ? [params.model, MODELO_FALLBACK]
+    : [params.model];
+  let ultimoErro;
+  for (const model of modelos) {
+    for (let i = 0; i < tentativas; i++) {
+      try {
+        return await anthropic.messages.create({ ...params, model });
+      } catch (err) {
+        ultimoErro = err;
+        if (!ehErroTransiente(err)) throw err;
+        const espera = 800 * 2 ** i; // 0,8s · 1,6s · 3,2s
+        console.warn(`Anthropic instável (${err.code || err.status || err.message}) em ${model}. Tentativa ${i + 1}/${tentativas}, aguardando ${espera}ms.`);
+        await new Promise((r) => setTimeout(r, espera));
+      }
+    }
+    if (model !== MODELO_FALLBACK) console.warn(`Trocando para o modelo de emergência: ${MODELO_FALLBACK}`);
+  }
+  throw ultimoErro;
+}
+
 async function processarMemorias(usuarioId, texto) {
   const regex = /\[MEMORIA:(\w+)\]\s*(.+)/g;
   let limpo = texto;
@@ -38,10 +80,7 @@ async function processarMemorias(usuarioId, texto) {
 }
 
 function extrairTexto(resposta) {
-  return resposta.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n');
+  return resposta.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 }
 
 function dataHoraSP() {
@@ -52,7 +91,48 @@ function dataHoraSP() {
   });
 }
 
-// Bloco de seleções para o contexto (Nível 1/2/3 + as que a pessoa pediu)
+// ---------- LAÇO AGÊNTICO ----------
+// Faz a chamada à API; se o modelo pedir uma ferramenta custom (futebol/notícias/
+// clima), executa e devolve o resultado, repetindo até ele responder. A busca web
+// é server-side (a Anthropic resolve sozinha). Limite de 5 voltas por segurança.
+async function conversarComFerramentas({ model, max_tokens, system, messages, contexto, usuarioId = null }) {
+  const tools = [...SERVER_TOOLS, ...ferramentasCustom()];
+  const msgs = [...messages];
+  let textoFinal = '';
+  try {
+    for (let i = 0; i < 5; i++) {
+      const resposta = await criarComRetry({ model, max_tokens, system, messages: msgs, tools });
+      await registrarUso(usuarioId, model, resposta.usage, contexto);
+
+      const txt = extrairTexto(resposta);
+      if (txt) textoFinal = txt;
+
+      if (resposta.stop_reason !== 'tool_use') break;
+
+      // Executa as ferramentas custom que o modelo pediu
+      const pedidos = resposta.content.filter((b) => b.type === 'tool_use');
+      if (pedidos.length === 0) break;
+      const resultados = [];
+      for (const p of pedidos) {
+        const saida = await executarFerramenta(p.name, p.input);
+        resultados.push({ type: 'tool_result', tool_use_id: p.id, content: saida });
+      }
+      msgs.push({ role: 'assistant', content: resposta.content });
+      msgs.push({ role: 'user', content: resultados });
+    }
+    return textoFinal;
+  } catch (err) {
+    // Anthropic esgotou as tentativas (incidente amplo). Aciona o PLANO B.
+    if (temFallback()) {
+      console.warn(`Anthropic indisponível (${err?.message || err}). Acionando plano B (provedor reserva)...`);
+      const texto = await responderFallback({ system, messages, max_tokens });
+      console.warn('Plano B respondeu com sucesso.');
+      return texto;
+    }
+    throw err;
+  }
+}
+
 function blocoSelecoes(selecoesGerais, selecoesUsuario) {
   if (!selecoesGerais || selecoesGerais.length === 0) return '';
   const porNivel = { 1: [], 2: [], 3: [] };
@@ -67,7 +147,6 @@ function blocoSelecoes(selecoesGerais, selecoesUsuario) {
   return txt;
 }
 
-// system com prompt caching: persona fixa (cacheada) + contexto variável
 function montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, selUser) {
   let contexto = `## Data e hora (use sempre esta, é a fonte da verdade)\n${dataHoraSP()}\n\n## Com quem você está falando\nNome: ${usuario.nome || 'desconhecido (pergunte!)'}`;
   if (usuario.caracteristica) {
@@ -108,41 +187,38 @@ export async function responder(usuario, historico, totalMensagens = 0) {
   ]);
   const modelo = usuario.modo === 'profundo' ? MODELO_PROFUNDO : MODELO_NORMAL;
 
-  const resposta = await anthropic.messages.create({
+  const textoFinal = await conversarComFerramentas({
     model: modelo,
     max_tokens: 1500,
     system: montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, selUser),
     messages: historico.map((m) => ({ role: m.papel, content: m.conteudo })),
-    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+    contexto: 'conversa',
+    usuarioId: usuario.id,
   });
 
-  await registrarUso(usuario.id, modelo, resposta.usage, 'conversa');
-  return processarMemorias(usuario.id, extrairTexto(resposta));
+  return processarMemorias(usuario.id, textoFinal);
 }
 
-// ---------- Tarefa de difusão (resenha/notícias/jogo): 1 chamada, vários destinos ----------
+// ---------- Difusão (resenha/notícias/jogo) ----------
 async function gerarDifusao(promptUsuario, contexto, maxTokens = 2000) {
-  const resposta = await anthropic.messages.create({
+  const textoFinal = await conversarComFerramentas({
     model: MODELO_NORMAL,
     max_tokens: maxTokens,
     system: [{ type: 'text', text: SISTEMA_BASE, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: promptUsuario }],
-    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+    contexto,
   });
-  await registrarUso(null, MODELO_NORMAL, resposta.usage, contexto);
-  return extrairTexto(resposta).replace(/\[MEMORIA:\w+\].*/g, '').trim();
+  return textoFinal.replace(/\[MEMORIA:\w+\].*/g, '').trim();
 }
 
-// Comentário diário das notícias
 export async function gerarComentarioDoDia() {
   const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'full' });
   return gerarDifusao(
-    `Hoje é ${hoje}. Pesquise na web as 3-4 notícias mais relevantes do dia (Brasil e mundo: política, economia, tecnologia, futebol — varie conforme o dia). Escreva o "Comentário do Sócrates": um giro pelas notícias COM personalidade — opinião, ironia fina, contexto histórico quando couber. Conversa de amigo bem informado, não telejornal. Formato WhatsApp, máx ~1500 caracteres. Termine com uma provocação do dia.`,
+    `Hoje é ${hoje}. Pesquise as 3-4 notícias mais relevantes do dia (Brasil e mundo: política, economia, tecnologia, futebol — varie conforme o dia; pode usar a ferramenta de notícias ou a busca web). Escreva o "Comentário do Sócrates": um giro pelas notícias COM personalidade — opinião, ironia fina, contexto histórico quando couber. Conversa de amigo bem informado, não telejornal. Formato WhatsApp, máx ~1500 caracteres. Termine com uma provocação do dia.`,
     'noticias'
   );
 }
 
-// ⚽ Resenha do Doutor turbinada: resultados + craques (consagrados e revelações) + seleções
 export async function gerarResenhaDoDoutor() {
   const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'full' });
   const selGerais = await listarSelecoes();
@@ -151,15 +227,14 @@ export async function gerarResenhaDoDoutor() {
   const blocoSel = `Seleções que o círculo acompanha — dê PRIORIDADE a elas: Nível 1 (sagrado): ${porNivel[1].join(', ')}; Nível 2: ${porNivel[2].join(', ')}; Nível 3: ${porNivel[3].join(', ')}.`;
 
   return gerarDifusao(
-    `Hoje é ${hoje} e estamos na Copa do Mundo 2026. Pesquise na web: (1) resultados de ontem, (2) jogos de HOJE com horário de Brasília, (3) os CRAQUES em destaque — tanto os consagrados que brilharam quanto REVELAÇÕES que surgiram (jogadores que o grande público ainda não conhecia). ${blocoSel}
+    `Hoje é ${hoje} e estamos na Copa do Mundo 2026. Busque dados REAIS (use a ferramenta de futebol para placar e tabela da Copa — código WC — e a busca web para o resto): (1) resultados de ontem, (2) jogos de HOJE com horário de Brasília, (3) os CRAQUES em destaque — consagrados e REVELAÇÕES. ${blocoSel}
 
-Escreva a "Resenha do Doutor", começando com a linha: ⚽ *Resenha do Doutor* — e a data por extenso. Depois o comentário com SUA personalidade: análise de quem entende de bola, ironia fina, memória das Copas antigas, carinho com a Seleção. Inclua um trecho "anota esse nome aí" destacando 1-2 craques/revelações do momento. Saudação coletiva VARIADA (nunca um nome específico): alterne "Salve, boêmios", "Bom dia, rapaziada", "E aí, time", ou vá direto. Formato WhatsApp, máx ~1700 caracteres. Feche com palpite OU provocação — pode ser técnico ou apaixonado, mas deixe claro de qual lado você está falando.`,
+Escreva a "Resenha do Doutor", começando com a linha: ⚽ *Resenha do Doutor* — e a data por extenso. Depois o comentário com SUA personalidade: análise de quem entende de bola, ironia fina, memória das Copas antigas, carinho com a Seleção. Inclua um "anota esse nome aí" destacando 1-2 craques/revelações. Saudação coletiva VARIADA (nunca um nome específico). Formato WhatsApp, máx ~1700 caracteres. Feche com palpite OU provocação — técnico ou apaixonado, deixando claro de qual lado fala.`,
     'resenha',
     2200
   );
 }
 
-// ⚽ Comentário de jogo (manual): momento = 'prejogo' | 'intervalo' | 'posjogo'
 export async function gerarComentarioJogo(momento) {
   const hoje = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'full', timeStyle: 'short' });
   const selGerais = await listarSelecoes();
@@ -168,13 +243,13 @@ export async function gerarComentarioJogo(momento) {
   const foco = `Durante a Copa o foco é o Brasil (${porNivel[1].join(', ')}); comente também ${porNivel[2].join(', ')} e ${porNivel[3].join(', ')} se estiverem jogando.`;
 
   const instr = {
-    prejogo: `Faça o ESQUENTA pré-jogo: contexto da partida, escalações prováveis, o que está em jogo, um craque para ficar de olho, e seu palpite (técnico ou apaixonado, assumindo o lado). Clima de quem vai sentar pra ver o jogo com os amigos.`,
-    intervalo: `Comente o INTERVALO: o que rolou no primeiro tempo (placar, lances, quem está bem/mal), e o que esperar do segundo. Rápido e afiado, como quem comenta no bar enquanto pega a próxima cerveja.`,
-    posjogo: `Faça o PÓS-JOGO: resultado, análise da partida, o craque (ou o vilão) do jogo, e o que isso significa pra frente. Resenha de quem entende, com emoção mas com olhar técnico.`,
+    prejogo: `Faça o ESQUENTA pré-jogo: contexto, escalações prováveis, o que está em jogo, um craque para ficar de olho, e seu palpite (técnico ou apaixonado, assumindo o lado).`,
+    intervalo: `Comente o INTERVALO: o que rolou no primeiro tempo (placar, lances, quem está bem/mal) e o que esperar do segundo. Rápido e afiado.`,
+    posjogo: `Faça o PÓS-JOGO: resultado, análise, o craque (ou vilão) do jogo, e o que significa pra frente. Emoção com olhar técnico.`,
   };
 
   return gerarDifusao(
-    `Agora é ${hoje}, Copa do Mundo 2026. Pesquise na web os dados REAIS do jogo mais relevante de agora (placar, lances, escalação conforme o momento). ${foco} ${instr[momento] || instr.prejogo} Comece com ⚽ e uma saudação coletiva variada (nunca um nome). Formato WhatsApp, máx ~1400 caracteres.`,
+    `Agora é ${hoje}, Copa do Mundo 2026. Busque os dados REAIS do jogo mais relevante de agora (use a ferramenta de futebol — código WC — para placar/tabela, e a busca web para escalação/lances). ${foco} ${instr[momento] || instr.prejogo} Comece com ⚽ e uma saudação coletiva variada (nunca um nome). Formato WhatsApp, máx ~1400 caracteres.`,
     `jogo_${momento}`,
     1800
   );
