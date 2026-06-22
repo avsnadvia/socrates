@@ -13,6 +13,8 @@ import {
   gerarComentarioJogo,
   gerarParabens,
   gerarPosJogo,
+  responderGrupo,
+  gerarFechamentoBolao,
 } from './claude.js';
 import {
   buscarUsuario,
@@ -37,6 +39,11 @@ import {
   listarSelecoes,
   jaAvisou,
   marcarAvisado,
+  salvarMensagemGrupo,
+  historicoGrupo,
+  palpitesPendentes,
+  pontuarPalpite,
+  rankingBolao,
 } from './dados.js';
 import { enviarMensagem, baixarMidiaBase64 } from './whatsapp.js';
 import { listarJogosCopa, mesmaSelecao } from './fontes.js';
@@ -118,6 +125,28 @@ async function tratarComando(usuario, texto) {
     return `⚽ Anotado seu palpite: ${jogo} = ${palpite}. Tá no bolão! Que o melhor (ou o mais sortudo) vença.`;
   }
 
+  // /ranking — placar do bolão (canal coletivo, todos podem ver)
+  if (t === '/ranking' || t === '/bolao' || t === '/bolão') {
+    const r = await rankingBolao();
+    if (!r.length) return '🏆 O bolão ainda não tem pontos. Mandem seus palpites com /palpite que eu vou contabilizando quando os jogos acabarem!';
+    const medalha = ['🥇', '🥈', '🥉'];
+    const linhas = r.map((u, i) => `${medalha[i] || `${i + 1}.`} ${u.nome} — *${u.pontos}* pts (${u.jogos}j)`);
+    return `🏆 *RANKING DO BOLÃO*\n\n${linhas.join('\n')}\n\n_Pontos: 10 (placar exato) · 7 (saldo certo) · 5 (acertou quem ganhou) · 0 (errou)_`;
+  }
+
+  if (t === '/fechar-bolao' || t === '/fechar-bolão') {
+    if (!usuario.admin) return null;
+    const r = await rankingBolao();
+    if (!r.length) return 'Sem pontos no bolão ainda — nada pra fechar.';
+    const msg = await gerarFechamentoBolao(r);
+    const assinantes = await listarAssinantes('recebe_copa');
+    for (const a of assinantes) {
+      await enviarMensagem(a.numero, msg);
+      await new Promise((rr) => setTimeout(rr, 3000));
+    }
+    return `🏆 Fechamento do bolão enviado para ${assinantes.length} pessoas.`;
+  }
+
   // /acompanhar Croácia  (a pessoa escolhe acompanhar uma seleção)
   if (t.startsWith('/acompanhar ')) {
     const sel = texto.trim().slice(12).trim();
@@ -154,6 +183,7 @@ async function tratarComando(usuario, texto) {
       '📰 /resenha on|off — minha Resenha da Copa (9h)\n' +
       '🌎 /noticias on|off — giro das notícias (8h)\n' +
       '🎯 /palpite Brasil x Marrocos = 2x1 — entra no bolão\n' +
+      '🏆 /ranking — placar do bolão\n' +
       '🏆 /acompanhar Croácia — sigo uma seleção sua de perto\n' +
       '📬 /recado NUMERO | texto — mando um recado seu pra outro do círculo\n' +
       '🧹 /esquecer — apago o que sei de você\n\n' +
@@ -164,6 +194,7 @@ async function tratarComando(usuario, texto) {
         '/add NUMERO Nome | característica\n' +
         '/remover NUMERO\n' +
         '/aniversario NUMERO DD/MM\n' +
+        '/fechar-bolao\n' +
         '/usuarios · /painel · /custo\n' +
         '/jogo-prejogo · /jogo-intervalo · /jogo-posjogo';
     }
@@ -262,7 +293,10 @@ app.post('/webhook', (req, res) => {
   if (!dados || dados.key?.fromMe) return;
 
   const remoteJid = dados.key?.remoteJid || '';
-  if (remoteJid.endsWith('@g.us')) return;
+  if (remoteJid.endsWith('@g.us')) {
+    tratarGrupo(remoteJid, dados);
+    return;
+  }
   const numero = remoteJid.split('@')[0];
 
   const imagem = dados.message?.imageMessage || null;
@@ -318,6 +352,88 @@ app.post('/webhook', (req, res) => {
 });
 
 app.get('/', (_req, res) => res.send('Sócrates no ar ⚽🧠'));
+
+// ---------- MODO GRUPO ----------
+const ultimoEspontaneo = new Map(); // grupoJid -> timestamp da última intromissão espontânea
+
+function mencionaramOBot(dados, texto) {
+  const t = (texto || '').toLowerCase();
+  const porNome = /(sócrates|socrates|magrão|magrao|doutor)/.test(t);
+  const botNum = (process.env.BOT_NUMERO || '').replace(/\D/g, '');
+  const mencionados = dados.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+  const porArroba = !!botNum && mencionados.some((j) => (j || '').includes(botNum));
+  return porNome || porArroba;
+}
+
+function tratarGrupo(grupoJid, dados) {
+  // Allowlist opcional: se GRUPOS_AUTORIZADOS estiver definido, só responde nesses grupos.
+  const permitidos = (process.env.GRUPOS_AUTORIZADOS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (permitidos.length && !permitidos.includes(grupoJid)) return;
+
+  const texto =
+    dados.message?.conversation ||
+    dados.message?.extendedTextMessage?.text ||
+    (dados.message?.imageMessage ? dados.message.imageMessage.caption || '[imagem]' : null);
+  if (!texto) return;
+
+  const participante = (dados.key?.participant || '').split('@')[0];
+
+  enfileirar(grupoJid, async () => {
+    let autorNome = dados.pushName || participante;
+    try {
+      const u = await buscarUsuario(participante);
+      if (u?.nome) autorNome = u.nome;
+    } catch {}
+
+    // Registra a fala no histórico do grupo (contexto para o juiz de boteco).
+    console.log(`[grupo ${grupoJid}] ${autorNome}: ${texto.slice(0, 50)}`);
+    await salvarMensagemGrupo(grupoJid, 'user', autorNome, texto);
+
+    const t = texto.trim();
+    const ehComando = t.startsWith('/');
+    const mencionado = mencionaramOBot(dados, texto);
+
+    let gatilho = null;
+    let espontaneo = false;
+
+    if (mencionado || ehComando) {
+      gatilho = ehComando
+        ? 'Te acionaram por comando no grupo. Se pedirem para julgar/resolver algo factual (placar, gol, tabela), aja como juiz de boteco e use a ferramenta de futebol. Responda direto.'
+        : 'Te chamaram/mencionaram agora. Responda direto a quem falou.';
+    } else {
+      // Modo espontâneo: só passa pelo freio triplo (ligado + cooldown + sorteio).
+      const ligado = (process.env.GRUPO_ESPONTANEO || 'on') !== 'off';
+      const cooldownMin = Number(process.env.GRUPO_COOLDOWN_MIN || 45);
+      const chance = Number(process.env.GRUPO_CHANCE || 0.1);
+      const ultimo = ultimoEspontaneo.get(grupoJid) || 0;
+      const passouCooldown = Date.now() - ultimo > cooldownMin * 60000;
+      if (ligado && passouCooldown && Math.random() < chance) {
+        espontaneo = true;
+        gatilho =
+          'Ninguém te chamou diretamente. Só entre na conversa se tiver algo CURTO e bom para somar (resolver uma dúvida, uma tirada com humor, um dado de futebol). Se não tiver nada que realmente valha, responda APENAS a palavra: PASSO';
+      }
+    }
+
+    if (!gatilho) return; // não é hora de falar
+
+    const historico = await historicoGrupo(grupoJid, 30);
+    let resposta;
+    try {
+      resposta = await responderGrupo({ historico, gatilho });
+    } catch (e) {
+      console.error('Falha no grupo:', e?.message || e);
+      return; // no grupo, silêncio é melhor que mensagem de erro
+    }
+    if (!resposta || resposta.trim().toUpperCase() === 'PASSO') return;
+
+    if (espontaneo) ultimoEspontaneo.set(grupoJid, Date.now());
+    await salvarMensagemGrupo(grupoJid, 'assistant', null, resposta);
+    await enviarMensagem(grupoJid, resposta);
+  });
+}
 
 // ---------- TAREFAS AGENDADAS ----------
 function agendar(expressao, nome, campoAssinatura, gerador) {
@@ -412,6 +528,55 @@ function dataSP(offsetDias = 0) {
   });
 }
 
+// Pontuação do bolão: 10 (exato) · 7 (saldo certo) · 5 (acertou vencedor/empate) · 0 (errou).
+function pontosPalpite(predCasa, predFora, realCasa, realFora) {
+  if (predCasa === realCasa && predFora === realFora) return 10;
+  const sp = Math.sign(predCasa - predFora);
+  const sr = Math.sign(realCasa - realFora);
+  if (sp === sr) return predCasa - predFora === realCasa - realFora ? 7 : 5;
+  return 0;
+}
+
+function parsePlacar(str) {
+  const m = (str || '').match(/(\d+)\s*[x×\-:]\s*(\d+)/i);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+async function corrigirBolao(finalizados) {
+  if (!finalizados.length) return;
+  const pendentes = await palpitesPendentes();
+  for (const p of pendentes) {
+    const partes = (p.jogo || '').split(/\s*[x×]\s*/i);
+    if (partes.length < 2) continue;
+    const t1 = partes[0].trim();
+    const t2 = partes[1].trim();
+    const jogo = finalizados.find(
+      (j) =>
+        (mesmaSelecao(t1, j.casa) && mesmaSelecao(t2, j.fora)) ||
+        (mesmaSelecao(t1, j.fora) && mesmaSelecao(t2, j.casa))
+    );
+    if (!jogo) continue;
+    const placarReal = `${jogo.casa} ${jogo.golCasa}x${jogo.golFora} ${jogo.fora}`;
+    const pred = parsePlacar(p.palpite);
+    if (!pred) {
+      await pontuarPalpite(p.id, 0, placarReal);
+      continue;
+    }
+    let predCasa;
+    let predFora;
+    if (mesmaSelecao(t1, jogo.casa)) {
+      predCasa = pred[0];
+      predFora = pred[1];
+    } else {
+      predCasa = pred[1];
+      predFora = pred[0];
+    }
+    const pts = pontosPalpite(predCasa, predFora, jogo.golCasa, jogo.golFora);
+    await pontuarPalpite(p.id, pts, placarReal);
+    console.log(`🎯 Bolão: ${p.jogo} = ${p.palpite} (real ${jogo.golCasa}x${jogo.golFora}) → ${pts}pts`);
+  }
+}
+
 async function radarFutebol() {
   const selecoes = await listarSelecoes();
   if (!selecoes.length) return;
@@ -421,6 +586,10 @@ async function radarFutebol() {
   const jogos = await listarJogosCopa({ dataInicio: dataSP(-1), dataFim: dataSP(1) });
   if (!jogos.length) return;
   const agora = Date.now();
+
+  // Pontua o bolão com os jogos já encerrados (independe das seleções acompanhadas).
+  const finalizados = jogos.filter((j) => j.status === 'FINISHED' && j.golCasa != null && j.golFora != null);
+  await corrigirBolao(finalizados);
 
   for (const j of jogos) {
     if (!acompanhada(j)) continue;
@@ -472,4 +641,4 @@ if (CRON_RADAR !== 'off') {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sócrates v4.8.0 rodando na porta ${PORT} ⚽`));
+app.listen(PORT, () => console.log(`Sócrates v4.10.0 rodando na porta ${PORT} ⚽`));

@@ -211,6 +211,36 @@ export async function responder(usuario, historico, totalMensagens = 0, anexo = 
   return processarMemorias(usuario.id, textoFinal);
 }
 
+// ---------- Modo Grupo (mediador/participante) ----------
+const GRUPO_REGRAS = `
+
+## VOCÊ ESTÁ NUM GRUPO (modo grupo — leia com atenção)
+Você está participando de um GRUPO de WhatsApp da turma, não de uma conversa privada.
+- COFRE LACRADO: aqui você NÃO tem acesso a nada que alguém te contou em particular. Não cite, não insinue, não use memória privada de ninguém. O grupo é canal público: trate apenas o que foi dito aqui no grupo.
+- Cada fala vem marcada com o nome de quem falou ("Fulano: ..."). Dirija-se às pessoas pelo nome quando fizer sentido.
+- SEJA CURTO: grupo não é lugar de textão. Uma ou duas frases na maioria das vezes. Solte algo mais longo só se pedirem análise.
+- Juiz de boteco: se houver discussão factual (placar, quem fez gol, tabela), resolva com a ferramenta de futebol (código WC) e encerre a treta com o dado certo.
+- Animador: puxe papo e provoque com bom humor — sem floodar.
+- Você NÃO é mediador de briga séria. Se o clima esquentar de verdade entre pessoas, alivie com humor ou desconverse, mas não tome partido nem dê sermão.`;
+
+export async function responderGrupo({ historico, gatilho }) {
+  const linhas = historico
+    .map((m) => (m.papel === 'assistant' ? `Sócrates: ${m.conteudo}` : `${m.autor || 'alguém'}: ${m.conteudo}`))
+    .join('\n');
+  const promptUsuario =
+    `Conversa recente no grupo:\n${linhas}\n\n` +
+    `Você é o Doutor Sócrates participando DESTE grupo. ${gatilho}\n` +
+    `Responda curto, no seu estilo. Se for resolver algo factual de futebol, use a ferramenta (código WC). Nunca use memória privada de ninguém.`;
+  const texto = await conversarComFerramentas({
+    model: MODELO_NORMAL,
+    max_tokens: 800,
+    system: [{ type: 'text', text: SISTEMA_BASE + GRUPO_REGRAS, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: promptUsuario }],
+    contexto: 'grupo',
+  });
+  return texto.replace(/\[MEMORIA:\w+\].*/g, '').trim();
+}
+
 // ---------- Difusão (resenha/notícias/jogo) ----------
 async function gerarDifusao(promptUsuario, contexto, maxTokens = 2000) {
   const textoFinal = await conversarComFerramentas({
@@ -239,6 +269,16 @@ export async function gerarPosJogo(jogo) {
     `Acabou de terminar AGORA um jogo da Copa do Mundo 2026: ${placar}. Escreva a resenha QUENTE do pós-jogo NO SEU ESTILO (Doutor Sócrates) — análise de quem entende de bola, emoção, ironia fina. Se ajudar, use a ferramenta de futebol (código WC) para conferir a classificação atualizada do grupo. Foque NESTE jogo (${placar}); não misture com outras partidas. Comece com ⚽ e uma saudação coletiva variada (nunca um nome específico). Formato WhatsApp, máx ~1200 caracteres. Feche com uma provocação ou palpite.`,
     'posjogo',
     1600
+  );
+}
+
+// Fechamento do bolão: comemora o líder e zoa (com carinho) o lanterna.
+export async function gerarFechamentoBolao(ranking) {
+  const tabela = ranking.map((u, i) => `${i + 1}. ${u.nome} — ${u.pontos}pts`).join('\n');
+  return gerarDifusao(
+    `Fechamento do nosso bolão da Copa. Ranking atual:\n${tabela}\n\nEscreva um boletim CURTO e divertido NO SEU ESTILO (Doutor Sócrates): exalte o líder e provoque com carinho o lanterna (zoeira de amigo, nunca humilhação). Comece com 🏆. Formato WhatsApp, máx ~600 caracteres.`,
+    'bolao',
+    800
   );
 }
 

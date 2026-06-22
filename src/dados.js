@@ -94,6 +94,23 @@ export async function marcarAvisado(matchId, tipo) {
   await supabase.from('socrates_jogos_avisados').insert({ match_id: matchId, tipo });
 }
 
+// ===================== GRUPO (modo mediador/participante) =====================
+export async function salvarMensagemGrupo(grupoJid, papel, autor, conteudo) {
+  await supabase
+    .from('socrates_grupo_mensagens')
+    .insert({ grupo_jid: grupoJid, papel, autor, conteudo });
+}
+
+export async function historicoGrupo(grupoJid, limite = 30) {
+  const { data } = await supabase
+    .from('socrates_grupo_mensagens')
+    .select('papel, autor, conteudo')
+    .eq('grupo_jid', grupoJid)
+    .order('criado_em', { ascending: false })
+    .limit(limite);
+  return (data || []).reverse();
+}
+
 // ===================== MENSAGENS =====================
 export async function salvarMensagem(usuarioId, papel, conteudo) {
   await supabase
@@ -191,6 +208,37 @@ export async function palpitesDoJogo(jogo) {
     nome: p.socrates_usuarios?.nome || 'alguém',
     palpite: p.palpite,
   }));
+}
+
+// Palpites ainda não corrigidos (para o radar pontuar quando o jogo terminar).
+export async function palpitesPendentes() {
+  const { data } = await supabase
+    .from('socrates_palpites')
+    .select('id, usuario_id, jogo, palpite')
+    .or('corrigido.is.null,corrigido.eq.false');
+  return data || [];
+}
+
+export async function pontuarPalpite(id, pontos, placarReal) {
+  await supabase
+    .from('socrates_palpites')
+    .update({ pontos, corrigido: true, placar_real: placarReal })
+    .eq('id', id);
+}
+
+export async function rankingBolao() {
+  const { data } = await supabase
+    .from('socrates_palpites')
+    .select('pontos, socrates_usuarios(nome)')
+    .eq('corrigido', true);
+  const mapa = {};
+  for (const p of data || []) {
+    const nome = p.socrates_usuarios?.nome || 'alguém';
+    if (!mapa[nome]) mapa[nome] = { nome, pontos: 0, jogos: 0 };
+    mapa[nome].pontos += p.pontos || 0;
+    mapa[nome].jogos += 1;
+  }
+  return Object.values(mapa).sort((a, b) => b.pontos - a.pontos);
 }
 
 // ===================== SELEÇÕES =====================
