@@ -17,6 +17,9 @@ import {
   selecoesDoUsuario,
   listarSelecoes,
   registrarUso,
+  criarLembrete,
+  salvarRespostaPergunta,
+  perguntaAtiva,
 } from './dados.js';
 import { ferramentasCustom, executarFerramenta } from './fontes.js';
 import { temFallback, responderFallback } from './fallback.js';
@@ -68,14 +71,44 @@ async function criarComRetry(params, tentativas = 3) {
   throw ultimoErro;
 }
 
-async function processarMemorias(usuarioId, texto) {
-  const regex = /\[MEMORIA:(\w+)\]\s*(.+)/g;
+async function processarMarcadores(usuario, perguntaAtivaObj, texto) {
   let limpo = texto;
+
+  // [MEMORIA:tipo] conteúdo
+  const reMem = /\[MEMORIA:(\w+)\]\s*(.+)/g;
   let m;
-  while ((m = regex.exec(texto)) !== null) {
-    await salvarMemoria(usuarioId, m[1].toLowerCase(), m[2].trim(), 'privado');
+  while ((m = reMem.exec(texto)) !== null) {
+    await salvarMemoria(usuario.id, m[1].toLowerCase(), m[2].trim(), 'privado');
     limpo = limpo.replace(m[0], '');
   }
+
+  // [LEMBRETE: AAAA-MM-DD HH:MM | texto]
+  const reLemb = /\[LEMBRETE:\s*(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})\s*\|\s*([^\]]+)\]/g;
+  let l;
+  while ((l = reLemb.exec(texto)) !== null) {
+    const quando = new Date(`${l[1]}T${l[2]}:00-03:00`); // horário de Brasília
+    if (!isNaN(quando.getTime())) {
+      await criarLembrete({
+        usuarioId: usuario.id,
+        numero: usuario.numero,
+        escopo: 'pessoal',
+        texto: l[3].trim(),
+        dispararEm: quando.toISOString(),
+      });
+    }
+    limpo = limpo.replace(l[0], '');
+  }
+
+  // [RESPOSTA: ...] — resposta à pergunta da semana
+  if (perguntaAtivaObj) {
+    const reResp = /\[RESPOSTA:\s*([^\]]+)\]/g;
+    let r;
+    while ((r = reResp.exec(texto)) !== null) {
+      await salvarRespostaPergunta(perguntaAtivaObj.id, usuario.id, r[1].trim());
+      limpo = limpo.replace(r[0], '');
+    }
+  }
+
   return limpo.trim();
 }
 
@@ -147,7 +180,7 @@ function blocoSelecoes(selecoesGerais, selecoesUsuario) {
   return txt;
 }
 
-function montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, selUser) {
+function montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, selUser, perguntaAtivaTexto = null) {
   let contexto = `## Data e hora (use sempre esta, é a fonte da verdade)\n${dataHoraSP()}\n\n## Com quem você está falando\nNome: ${usuario.nome || 'desconhecido (pergunte!)'}`;
   if (usuario.caracteristica) {
     contexto += `\n\nO Rodrigo te apresentou esta pessoa assim: "${usuario.caracteristica}". Use para puxar assunto com naturalidade, sem repetir como ficha.`;
@@ -171,6 +204,15 @@ function montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, se
   } else {
     contexto += `\n\n## Contexto da relação\nVocês já trocaram ~${totalMensagens} mensagens. Se já houver intimidade e você ainda não registrou como ela prefere ser chamada, pergunte com naturalidade. Se já souber o apelido, use e não pergunte de novo.`;
   }
+
+  // Lembretes: se a pessoa pedir para ser lembrada de algo, confirme no papo E acrescente o marcador.
+  contexto += `\n\n## Lembretes (ferramenta sua)\nSe a pessoa pedir para você lembrá-la de algo ("me lembra...", "amanhã às 9h me avisa..."), confirme com naturalidade na conversa E, no FIM da resposta, em linha separada, acrescente o marcador:\n[LEMBRETE: AAAA-MM-DD HH:MM | o que lembrar]\nUse a Data e hora acima como âncora para calcular a data/hora absoluta (horário de Brasília, formato 24h). Exemplo: se hoje é segunda e pedirem "quinta às 14h", calcule a data exata da quinta. Só inclua o marcador quando houver um pedido real de lembrete.`;
+
+  // Pergunta da semana ativa: capturar a resposta da pessoa (será sintetizada de forma anônima).
+  if (perguntaAtivaTexto) {
+    contexto += `\n\n## Pergunta da semana ativa\nHá uma pergunta da semana rolando: "${perguntaAtivaTexto}". Se a mensagem da pessoa for uma RESPOSTA a essa pergunta, reaja com naturalidade E, no fim, em linha separada, acrescente:\n[RESPOSTA: resumo da resposta dela em 1 frase]\nSó faça isso se ela realmente estiver respondendo à pergunta — não force.`;
+  }
+
   return [
     { type: 'text', text: SISTEMA_BASE, cache_control: { type: 'ephemeral' } },
     { type: 'text', text: contexto },
@@ -179,11 +221,12 @@ function montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, se
 
 // ---------- Conversa normal ----------
 export async function responder(usuario, historico, totalMensagens = 0, anexo = null) {
-  const [memorias, relacao, selGerais, selUser] = await Promise.all([
+  const [memorias, relacao, selGerais, selUser, pergunta] = await Promise.all([
     buscarMemorias(usuario.id),
     buscarRelacao(usuario.id),
     listarSelecoes(),
     selecoesDoUsuario(usuario.id),
+    perguntaAtiva(),
   ]);
   const modelo = usuario.modo === 'profundo' ? MODELO_PROFUNDO : MODELO_NORMAL;
 
@@ -202,13 +245,13 @@ export async function responder(usuario, historico, totalMensagens = 0, anexo = 
   const textoFinal = await conversarComFerramentas({
     model: modelo,
     max_tokens: 1500,
-    system: montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, selUser),
+    system: montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, selUser, pergunta?.texto),
     messages,
     contexto: 'conversa',
     usuarioId: usuario.id,
   });
 
-  return processarMemorias(usuario.id, textoFinal);
+  return processarMarcadores(usuario, pergunta, textoFinal);
 }
 
 // ---------- Modo Grupo (mediador/participante) ----------
@@ -279,6 +322,25 @@ export async function gerarFechamentoBolao(ranking) {
     `Fechamento do nosso bolão da Copa. Ranking atual:\n${tabela}\n\nEscreva um boletim CURTO e divertido NO SEU ESTILO (Doutor Sócrates): exalte o líder e provoque com carinho o lanterna (zoeira de amigo, nunca humilhação). Comece com 🏆. Formato WhatsApp, máx ~600 caracteres.`,
     'bolao',
     800
+  );
+}
+
+// Lança a pergunta da semana (provocação de boteco para a turma responder).
+export async function gerarPerguntaSemana() {
+  return gerarDifusao(
+    `Crie a "Pergunta da Semana" para a turma de amigos responder — uma provocação de boteco boa, no SEU ESTILO (Doutor Sócrates): pode ser sobre futebol, filosofia de vida, dilemas, memória afetiva, "o que você faria se...". Curta e instigante, que renda conversa. Comece com 💬 *PERGUNTA DA SEMANA* e convide a responderem aqui mesmo no privado. Máx ~400 caracteres.`,
+    'pergunta',
+    600
+  );
+}
+
+// Síntese anônima das respostas (vai para o admin revisar antes de soltar).
+export async function gerarSintesePergunta(pergunta, respostas) {
+  const lista = respostas.map((r, i) => `${i + 1}. ${r}`).join('\n');
+  return gerarDifusao(
+    `A pergunta da semana foi: "${pergunta}". As respostas da turma (ANÔNIMAS — nunca diga quem disse o quê) foram:\n${lista}\n\nEscreva uma síntese saborosa NO SEU ESTILO (Doutor Sócrates): destaque os padrões, as divergências curiosas, a resposta mais inesperada — tudo SEM identificar ninguém. Comece com 💬. Formato WhatsApp, máx ~900 caracteres.`,
+    'sintese',
+    1200
   );
 }
 

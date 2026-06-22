@@ -15,6 +15,8 @@ import {
   gerarPosJogo,
   responderGrupo,
   gerarFechamentoBolao,
+  gerarPerguntaSemana,
+  gerarSintesePergunta,
 } from './claude.js';
 import {
   buscarUsuario,
@@ -44,6 +46,13 @@ import {
   palpitesPendentes,
   pontuarPalpite,
   rankingBolao,
+  criarLembrete,
+  lembretesPendentes,
+  marcarLembreteEnviado,
+  listarAdmins,
+  criarPergunta,
+  perguntaAtiva,
+  respostasDaPergunta,
 } from './dados.js';
 import { enviarMensagem, baixarMidiaBase64 } from './whatsapp.js';
 import { listarJogosCopa, mesmaSelecao } from './fontes.js';
@@ -147,6 +156,55 @@ async function tratarComando(usuario, texto) {
     return `🏆 Fechamento do bolão enviado para ${assinantes.length} pessoas.`;
   }
 
+  // /lembrar-todos DD/MM HH:MM | mensagem  (lembrete coletivo — só admin)
+  if (t.startsWith('/lembrar-todos ')) {
+    if (!usuario.admin) return null;
+    const corpo = texto.trim().slice(15).trim();
+    const sep = corpo.indexOf('|');
+    if (sep === -1) return 'Manda assim: /lembrar-todos 25/12 09:00 | Feliz Natal, galera!';
+    const quandoStr = corpo.slice(0, sep).trim();
+    const msg = corpo.slice(sep + 1).trim();
+    const md = quandoStr.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s+(\d{1,2}):(\d{2})$/);
+    if (!md || !msg) return 'Manda assim: /lembrar-todos 25/12 09:00 | mensagem';
+    const ano = md[3] ? (md[3].length === 2 ? `20${md[3]}` : md[3]) : String(new Date().getFullYear());
+    const iso = `${ano}-${md[2].padStart(2, '0')}-${md[1].padStart(2, '0')}T${md[4].padStart(2, '0')}:${md[5]}:00-03:00`;
+    const quando = new Date(iso);
+    if (isNaN(quando.getTime())) return 'Data inválida. Ex: /lembrar-todos 25/12 09:00 | mensagem';
+    await criarLembrete({ usuarioId: usuario.id, numero: null, escopo: 'coletivo', texto: msg, dispararEm: quando.toISOString() });
+    return `⏰ Lembrete coletivo agendado para ${md[1].padStart(2, '0')}/${md[2].padStart(2, '0')} às ${md[4].padStart(2, '0')}:${md[5]}. Vou avisar a turma toda na hora.`;
+  }
+
+  // /perguntar <texto>  (lança a pergunta da semana na hora — só admin)
+  if (t.startsWith('/perguntar ')) {
+    if (!usuario.admin) return null;
+    const texPergunta = texto.trim().slice(11).trim();
+    if (!texPergunta) return 'Manda assim: /perguntar Qual foi o gol mais bonito que você já viu ao vivo?';
+    await criarPergunta(texPergunta);
+    const assinantes = await listarAssinantes('recebe_copa');
+    const msg = `💬 *PERGUNTA DA SEMANA*\n\n${texPergunta}\n\n_Responde aqui no privado que eu compilo!_`;
+    for (const a of assinantes) {
+      await enviarMensagem(a.numero, msg);
+      await new Promise((rr) => setTimeout(rr, 2500));
+    }
+    return `💬 Pergunta lançada para ${assinantes.length} pessoas.`;
+  }
+
+  // /soltar-sintese  (envia a síntese da pergunta atual para a turma — só admin)
+  if (t === '/soltar-sintese') {
+    if (!usuario.admin) return null;
+    const p = await perguntaAtiva();
+    if (!p) return 'Não há pergunta da semana ativa.';
+    const respostas = await respostasDaPergunta(p.id);
+    if (!respostas.length) return 'Ninguém respondeu ainda — nada para sintetizar.';
+    const sintese = await gerarSintesePergunta(p.texto, respostas);
+    const assinantes = await listarAssinantes('recebe_copa');
+    for (const a of assinantes) {
+      await enviarMensagem(a.numero, sintese);
+      await new Promise((rr) => setTimeout(rr, 3000));
+    }
+    return `💬 Síntese enviada para ${assinantes.length} pessoas.`;
+  }
+
   // /acompanhar Croácia  (a pessoa escolhe acompanhar uma seleção)
   if (t.startsWith('/acompanhar ')) {
     const sel = texto.trim().slice(12).trim();
@@ -184,6 +242,7 @@ async function tratarComando(usuario, texto) {
       '🌎 /noticias on|off — giro das notícias (8h)\n' +
       '🎯 /palpite Brasil x Marrocos = 2x1 — entra no bolão\n' +
       '🏆 /ranking — placar do bolão\n' +
+      '⏰ "me lembra amanhã às 9h de..." — eu te aviso na hora\n' +
       '🏆 /acompanhar Croácia — sigo uma seleção sua de perto\n' +
       '📬 /recado NUMERO | texto — mando um recado seu pra outro do círculo\n' +
       '🧹 /esquecer — apago o que sei de você\n\n' +
@@ -195,6 +254,8 @@ async function tratarComando(usuario, texto) {
         '/remover NUMERO\n' +
         '/aniversario NUMERO DD/MM\n' +
         '/fechar-bolao\n' +
+        '/lembrar-todos DD/MM HH:MM | msg\n' +
+        '/perguntar TEXTO · /soltar-sintese\n' +
         '/usuarios · /painel · /custo\n' +
         '/jogo-prejogo · /jogo-intervalo · /jogo-posjogo';
     }
@@ -366,6 +427,9 @@ function mencionaramOBot(dados, texto) {
 }
 
 function tratarGrupo(grupoJid, dados) {
+  // Modo grupo é OPT-IN: o Doutor só atua em grupos se GRUPO_ATIVO=on.
+  if ((process.env.GRUPO_ATIVO || 'off') !== 'on') return;
+
   // Allowlist opcional: se GRUPOS_AUTORIZADOS estiver definido, só responde nesses grupos.
   const permitidos = (process.env.GRUPOS_AUTORIZADOS || '')
     .split(',')
@@ -640,5 +704,90 @@ if (CRON_RADAR !== 'off') {
   console.log(`Tarefa "Radar de futebol" agendada: ${CRON_RADAR}`);
 }
 
+// ⏰ LEMBRETES — verifica a cada minuto e dispara os que chegaram a hora.
+async function dispararLembretes() {
+  const pendentes = await lembretesPendentes();
+  for (const l of pendentes) {
+    try {
+      if (l.escopo === 'coletivo') {
+        const todos = await listarUsuarios();
+        const msg = `⏰ *Recado pra todos:* ${l.texto}`;
+        for (const u of todos) {
+          await enviarMensagem(u.numero, msg);
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+      } else if (l.numero) {
+        await enviarMensagem(l.numero, `⏰ Ó, aquele lembrete que você me pediu: ${l.texto}`);
+      }
+      await marcarLembreteEnviado(l.id);
+      console.log(`⏰ Lembrete disparado (${l.escopo}): ${l.texto.slice(0, 40)}`);
+    } catch (e) {
+      console.error('Erro ao disparar lembrete:', e?.message || e);
+    }
+  }
+}
+
+const CRON_LEMBRETES = process.env.CRON_LEMBRETES || '* * * * *';
+if (CRON_LEMBRETES !== 'off') {
+  cron.schedule(
+    CRON_LEMBRETES,
+    () => dispararLembretes().catch((e) => console.error('Erro nos lembretes:', e?.message || e)),
+    { timezone: 'America/Sao_Paulo' }
+  );
+  console.log(`Tarefa "Lembretes" agendada: ${CRON_LEMBRETES}`);
+}
+
+// 💬 PERGUNTA DA SEMANA — lança a pergunta (seg 10h) e manda a síntese ao admin (sex 18h).
+const CRON_PERGUNTA = process.env.CRON_PERGUNTA || '0 10 * * 1';
+if (CRON_PERGUNTA !== 'off') {
+  cron.schedule(
+    CRON_PERGUNTA,
+    async () => {
+      try {
+        const assinantes = await listarAssinantes('recebe_copa');
+        if (!assinantes.length) return;
+        const texto = await gerarPerguntaSemana();
+        await criarPergunta(texto.replace(/^💬\s*\*?PERGUNTA DA SEMANA\*?\s*/i, '').trim() || texto);
+        console.log(`💬 Pergunta da semana lançada para ${assinantes.length} pessoas`);
+        for (const a of assinantes) {
+          await enviarMensagem(a.numero, texto);
+          await new Promise((r) => setTimeout(r, 2500));
+        }
+      } catch (e) {
+        console.error('Erro na pergunta da semana:', e?.message || e);
+      }
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+  console.log(`Tarefa "Pergunta da semana" agendada: ${CRON_PERGUNTA}`);
+}
+
+const CRON_SINTESE = process.env.CRON_SINTESE || '0 18 * * 5';
+if (CRON_SINTESE !== 'off') {
+  cron.schedule(
+    CRON_SINTESE,
+    async () => {
+      try {
+        const p = await perguntaAtiva();
+        if (!p) return;
+        const respostas = await respostasDaPergunta(p.id);
+        if (!respostas.length) return;
+        const sintese = await gerarSintesePergunta(p.texto, respostas);
+        const admins = await listarAdmins();
+        const aviso = `🔎 *Síntese da pergunta da semana* (revise antes de soltar pra turma com /soltar-sintese)\n\n${sintese}`;
+        for (const a of admins) {
+          await enviarMensagem(a.numero, aviso);
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        console.log(`💬 Síntese enviada para ${admins.length} admin(s) revisar`);
+      } catch (e) {
+        console.error('Erro na síntese da pergunta:', e?.message || e);
+      }
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+  console.log(`Tarefa "Síntese da pergunta" agendada: ${CRON_SINTESE}`);
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sócrates v4.10.0 rodando na porta ${PORT} ⚽`));
+app.listen(PORT, () => console.log(`Sócrates v4.11.0 rodando na porta ${PORT} ⚽`));

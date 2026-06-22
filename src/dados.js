@@ -343,3 +343,76 @@ export async function esquecerUsuario(usuarioId) {
   await supabase.from('socrates_mensagens').delete().eq('usuario_id', usuarioId);
   await supabase.from('socrates_relacao').delete().eq('usuario_id', usuarioId);
 }
+
+// ===================== LEMBRETES =====================
+export async function criarLembrete({ usuarioId, numero, escopo, texto, dispararEm }) {
+  await supabase.from('socrates_lembretes').insert({
+    usuario_id: usuarioId,
+    numero,
+    escopo: escopo || 'pessoal',
+    texto,
+    disparar_em: dispararEm,
+  });
+}
+
+export async function lembretesPendentes() {
+  const { data } = await supabase
+    .from('socrates_lembretes')
+    .select('id, numero, escopo, texto')
+    .eq('enviado', false)
+    .lte('disparar_em', new Date().toISOString());
+  return data || [];
+}
+
+export async function marcarLembreteEnviado(id) {
+  await supabase.from('socrates_lembretes').update({ enviado: true }).eq('id', id);
+}
+
+export async function listarAdmins() {
+  const { data } = await supabase
+    .from('socrates_usuarios')
+    .select('numero, nome')
+    .eq('admin', true);
+  return data || [];
+}
+
+// ===================== PERGUNTA DA SEMANA =====================
+export async function criarPergunta(texto) {
+  await supabase.from('socrates_pergunta').update({ ativa: false }).eq('ativa', true);
+  const { data } = await supabase
+    .from('socrates_pergunta')
+    .insert({ texto, ativa: true })
+    .select('id, texto')
+    .single();
+  return data;
+}
+
+export async function perguntaAtiva() {
+  const { data } = await supabase
+    .from('socrates_pergunta')
+    .select('id, texto')
+    .eq('ativa', true)
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data || null;
+}
+
+export async function salvarRespostaPergunta(perguntaId, usuarioId, resposta) {
+  await supabase
+    .from('socrates_pergunta_respostas')
+    .delete()
+    .eq('pergunta_id', perguntaId)
+    .eq('usuario_id', usuarioId);
+  await supabase
+    .from('socrates_pergunta_respostas')
+    .insert({ pergunta_id: perguntaId, usuario_id: usuarioId, resposta });
+}
+
+export async function respostasDaPergunta(perguntaId) {
+  const { data } = await supabase
+    .from('socrates_pergunta_respostas')
+    .select('resposta')
+    .eq('pergunta_id', perguntaId);
+  return (data || []).map((r) => r.resposta);
+}
