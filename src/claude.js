@@ -232,6 +232,16 @@ export async function gerarParabens(nome) {
   );
 }
 
+// Resenha QUENTE de um jogo que acabou de terminar (radar automático de pós-jogo).
+export async function gerarPosJogo(jogo) {
+  const placar = `${jogo.casa} ${jogo.golCasa}x${jogo.golFora} ${jogo.fora}`;
+  return gerarDifusao(
+    `Acabou de terminar AGORA um jogo da Copa do Mundo 2026: ${placar}. Escreva a resenha QUENTE do pós-jogo NO SEU ESTILO (Doutor Sócrates) — análise de quem entende de bola, emoção, ironia fina. Se ajudar, use a ferramenta de futebol (código WC) para conferir a classificação atualizada do grupo. Foque NESTE jogo (${placar}); não misture com outras partidas. Comece com ⚽ e uma saudação coletiva variada (nunca um nome específico). Formato WhatsApp, máx ~1200 caracteres. Feche com uma provocação ou palpite.`,
+    'posjogo',
+    1600
+  );
+}
+
 export async function gerarComentarioDoDia() {
   const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'full' });
   return gerarDifusao(

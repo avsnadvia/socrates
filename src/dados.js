@@ -79,6 +79,21 @@ export async function aniversariantesDeHoje() {
   return data || [];
 }
 
+// ===================== RADAR DE FUTEBOL (anti-duplicata) =====================
+export async function jaAvisou(matchId, tipo) {
+  const { data } = await supabase
+    .from('socrates_jogos_avisados')
+    .select('match_id')
+    .eq('match_id', matchId)
+    .eq('tipo', tipo)
+    .maybeSingle();
+  return !!data;
+}
+
+export async function marcarAvisado(matchId, tipo) {
+  await supabase.from('socrates_jogos_avisados').insert({ match_id: matchId, tipo });
+}
+
 // ===================== MENSAGENS =====================
 export async function salvarMensagem(usuarioId, papel, conteudo) {
   await supabase

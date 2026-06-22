@@ -12,6 +12,7 @@ import {
   gerarResenhaDoDoutor,
   gerarComentarioJogo,
   gerarParabens,
+  gerarPosJogo,
 } from './claude.js';
 import {
   buscarUsuario,
@@ -33,8 +34,12 @@ import {
   registrarRecado,
   esquecerUsuario,
   aniversariantesDeHoje,
+  listarSelecoes,
+  jaAvisou,
+  marcarAvisado,
 } from './dados.js';
 import { enviarMensagem, baixarMidiaBase64 } from './whatsapp.js';
+import { listarJogosCopa, mesmaSelecao } from './fontes.js';
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -400,5 +405,71 @@ if (CRON_ANIVERSARIO !== 'off') {
   console.log(`Tarefa "Aniversários" agendada: ${CRON_ANIVERSARIO}`);
 }
 
+// ⚽ RADAR DE FUTEBOL — alerta de jogo (~1h antes) e pós-jogo automático.
+function dataSP(offsetDias = 0) {
+  return new Date(Date.now() + offsetDias * 86400000).toLocaleDateString('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+  });
+}
+
+async function radarFutebol() {
+  const selecoes = await listarSelecoes();
+  if (!selecoes.length) return;
+  const nomes = selecoes.map((s) => s.selecao).filter(Boolean);
+  const acompanhada = (j) => nomes.some((n) => mesmaSelecao(n, j.casa) || mesmaSelecao(n, j.fora));
+
+  const jogos = await listarJogosCopa({ dataInicio: dataSP(-1), dataFim: dataSP(1) });
+  if (!jogos.length) return;
+  const agora = Date.now();
+
+  for (const j of jogos) {
+    if (!acompanhada(j)) continue;
+    const inicio = new Date(j.utcDate).getTime();
+    const minAte = (inicio - agora) / 60000;
+    const minDesde = (agora - inicio) / 60000;
+
+    // ALERTA — jogo começa em ~30 a 75 minutos
+    if (['SCHEDULED', 'TIMED'].includes(j.status) && minAte > 30 && minAte <= 75) {
+      if (!(await jaAvisou(j.id, 'alerta'))) {
+        const hora = new Date(j.utcDate).toLocaleTimeString('pt-BR', {
+          timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit',
+        });
+        const msg = `⚽ Daqui a pouco tem jogo da nossa Copa! *${j.casa} x ${j.fora}* começa às ${hora} (horário de Brasília). Já vai separando a cerveja que o Magrão tá de olho. 🍺`;
+        const assinantes = await listarAssinantes('recebe_copa');
+        console.log(`📣 Alerta: ${j.casa} x ${j.fora} → ${assinantes.length} pessoas`);
+        for (const a of assinantes) {
+          await enviarMensagem(a.numero, msg);
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        await marcarAvisado(j.id, 'alerta');
+      }
+    }
+
+    // PÓS-JOGO — terminou com placar e foi recente (até ~6h após o início)
+    if (j.status === 'FINISHED' && j.golCasa != null && j.golFora != null && minDesde > 0 && minDesde <= 360) {
+      if (!(await jaAvisou(j.id, 'posjogo'))) {
+        console.log(`📝 Pós-jogo: ${j.casa} ${j.golCasa}x${j.golFora} ${j.fora}`);
+        const texto = await gerarPosJogo(j);
+        const assinantes = await listarAssinantes('recebe_copa');
+        for (const a of assinantes) {
+          await enviarMensagem(a.numero, texto);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        await marcarAvisado(j.id, 'posjogo');
+      }
+    }
+  }
+}
+
+const CRON_RADAR = process.env.CRON_RADAR || '*/15 * * * *';
+if (CRON_RADAR !== 'off') {
+  cron.schedule(
+    CRON_RADAR,
+    () => radarFutebol().catch((e) => console.error('Erro no radar de futebol:', e?.message || e)),
+    { timezone: 'America/Sao_Paulo' }
+  );
+  console.log(`Tarefa "Radar de futebol" agendada: ${CRON_RADAR}`);
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sócrates v4.7.0 rodando na porta ${PORT} ⚽`));
+app.listen(PORT, () => console.log(`Sócrates v4.8.0 rodando na porta ${PORT} ⚽`));

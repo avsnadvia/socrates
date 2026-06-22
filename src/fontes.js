@@ -62,6 +62,60 @@ function resumirTabela(data) {
   return partes.length ? partes.join('\n') : 'Tabela não disponível.';
 }
 
+// Retorna os jogos da Copa (código WC) em DADOS ESTRUTURADOS, para o radar automático.
+export async function listarJogosCopa({ dataInicio, dataFim, status } = {}) {
+  const key = process.env.FOOTBALL_DATA_KEY;
+  if (!key) return [];
+  const q = new URLSearchParams();
+  if (status) q.set('status', status);
+  if (dataInicio) q.set('dateFrom', dataInicio);
+  if (dataFim) q.set('dateTo', dataFim);
+  const qs = q.toString();
+  const url = `https://api.football-data.org/v4/competitions/WC/matches${qs ? `?${qs}` : ''}`;
+  try {
+    const r = await fetch(url, { headers: { 'X-Auth-Token': key } });
+    if (!r.ok) return [];
+    const data = await r.json();
+    return (data.matches || []).map((m) => ({
+      id: String(m.id),
+      status: m.status,
+      utcDate: m.utcDate,
+      casa: m.homeTeam?.name || '?',
+      fora: m.awayTeam?.name || '?',
+      golCasa: m.score?.fullTime?.home,
+      golFora: m.score?.fullTime?.away,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// Casa nomes de seleção entre PT (cadastrado no círculo) e EN (devolvido pela API).
+const ALIAS_SELECOES = {
+  brasil: 'brazil', alemanha: 'germany', espanha: 'spain', inglaterra: 'england',
+  franca: 'france', italia: 'italy', holanda: 'netherlands', 'paises baixos': 'netherlands',
+  belgica: 'belgium', croacia: 'croatia', suica: 'switzerland', 'arabia saudita': 'saudi arabia',
+  'coreia do sul': 'south korea', japao: 'japan', 'estados unidos': 'united states', eua: 'united states',
+  mexico: 'mexico', marrocos: 'morocco', 'costa do marfim': 'ivory coast', dinamarca: 'denmark',
+  suecia: 'sweden', polonia: 'poland', 'pais de gales': 'wales', servia: 'serbia', russia: 'russia',
+  uruguai: 'uruguay', argentina: 'argentina', colombia: 'colombia', equador: 'ecuador', peru: 'peru',
+  chile: 'chile', paraguai: 'paraguay', portugal: 'portugal', 'estados unidos da america': 'united states',
+  canada: 'canada', australia: 'australia', 'africa do sul': 'south africa', nigeria: 'nigeria',
+  senegal: 'senegal', gana: 'ghana', camaroes: 'cameroon', egito: 'egypt', tunisia: 'tunisia',
+  catar: 'qatar', ira: 'iran', 'coreia do norte': 'north korea', 'nova zelandia': 'new zealand',
+  escocia: 'scotland', 'irlanda do norte': 'northern ireland', 'republica tcheca': 'czech republic',
+};
+const norm = (s) =>
+  (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+
+export function mesmaSelecao(nomeA, nomeB) {
+  let a = norm(nomeA);
+  let b = norm(nomeB);
+  a = ALIAS_SELECOES[a] || a;
+  b = ALIAS_SELECOES[b] || b;
+  return a === b;
+}
+
 // ===================== NOTÍCIAS — GNews =====================
 export async function consultarNoticias({ busca, idioma = 'pt' }) {
   const key = process.env.GNEWS_KEY;
