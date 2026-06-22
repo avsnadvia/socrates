@@ -178,7 +178,7 @@ function montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, se
 }
 
 // ---------- Conversa normal ----------
-export async function responder(usuario, historico, totalMensagens = 0) {
+export async function responder(usuario, historico, totalMensagens = 0, anexo = null) {
   const [memorias, relacao, selGerais, selUser] = await Promise.all([
     buscarMemorias(usuario.id),
     buscarRelacao(usuario.id),
@@ -187,11 +187,23 @@ export async function responder(usuario, historico, totalMensagens = 0) {
   ]);
   const modelo = usuario.modo === 'profundo' ? MODELO_PROFUNDO : MODELO_NORMAL;
 
+  const messages = historico.map((m) => ({ role: m.papel, content: m.conteudo }));
+
+  // Se veio uma imagem, injeta ela na última mensagem do usuário (visão).
+  if (anexo?.data && messages.length) {
+    const ultima = messages[messages.length - 1];
+    const legenda = typeof ultima.content === 'string' ? ultima.content.replace(/^\[imagem\]\s*/, '') : '';
+    ultima.content = [
+      { type: 'image', source: { type: 'base64', media_type: anexo.media_type, data: anexo.data } },
+      { type: 'text', text: legenda || 'Dá uma olhada nessa imagem que te mandei e comenta no teu estilo.' },
+    ];
+  }
+
   const textoFinal = await conversarComFerramentas({
     model: modelo,
     max_tokens: 1500,
     system: montarSistema(usuario, memorias, totalMensagens, relacao, selGerais, selUser),
-    messages: historico.map((m) => ({ role: m.papel, content: m.conteudo })),
+    messages,
     contexto: 'conversa',
     usuarioId: usuario.id,
   });
@@ -209,6 +221,15 @@ async function gerarDifusao(promptUsuario, contexto, maxTokens = 2000) {
     contexto,
   });
   return textoFinal.replace(/\[MEMORIA:\w+\].*/g, '').trim();
+}
+
+// Mensagem de feliz aniversário no estilo do Doutor.
+export async function gerarParabens(nome) {
+  return gerarDifusao(
+    `Hoje é aniversário de ${nome}, um dos amigos do círculo. Escreva uma mensagem curta de feliz aniversário NO SEU ESTILO (Doutor Sócrates) — calorosa, com bom humor e um toque filosófico ou futebolístico, como um amigo de verdade manda no WhatsApp. Fale direto com ${nome} (segunda pessoa, "você"). Comece com um 🎂 ou 🎉. Máx ~400 caracteres. Não invente fatos da vida dele.`,
+    'parabens',
+    600
+  );
 }
 
 export async function gerarComentarioDoDia() {

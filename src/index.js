@@ -11,6 +11,7 @@ import {
   gerarComentarioDoDia,
   gerarResenhaDoDoutor,
   gerarComentarioJogo,
+  gerarParabens,
 } from './claude.js';
 import {
   buscarUsuario,
@@ -31,8 +32,9 @@ import {
   custoTotal,
   registrarRecado,
   esquecerUsuario,
+  aniversariantesDeHoje,
 } from './dados.js';
-import { enviarMensagem } from './whatsapp.js';
+import { enviarMensagem, baixarMidiaBase64 } from './whatsapp.js';
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -156,6 +158,7 @@ async function tratarComando(usuario, texto) {
         '\n\n*Admin:*\n' +
         '/add NUMERO Nome | característica\n' +
         '/remover NUMERO\n' +
+        '/aniversario NUMERO DD/MM\n' +
         '/usuarios · /painel · /custo\n' +
         '/jogo-prejogo · /jogo-intervalo · /jogo-posjogo';
     }
@@ -181,6 +184,18 @@ async function tratarComando(usuario, texto) {
       const numero = texto.trim().split(/\s+/)[1]?.replace(/\D/g, '');
       const ok = await removerUsuario(numero);
       return ok ? '✅ Removido (histórico e memórias apagados).' : 'Número não encontrado.';
+    }
+    if (t.startsWith('/aniversario ')) {
+      const parts = texto.trim().split(/\s+/);
+      const numero = (parts[1] || '').replace(/\D/g, '');
+      const m = (parts[2] || '').match(/^(\d{1,2})\/(\d{1,2})$/);
+      if (!numero || !m) return 'Formato: /aniversario 5516991234567 25/12';
+      const dd = m[1].padStart(2, '0');
+      const mm = m[2].padStart(2, '0');
+      const alvo = await buscarUsuario(numero);
+      if (!alvo) return 'Esse número não está no círculo.';
+      await atualizarUsuario(alvo.id, { aniversario: `${mm}-${dd}` });
+      return `🎂 Anotado! Aniversário de ${alvo.nome || numero} em ${dd}/${mm}. Vou lembrar todo ano.`;
     }
     if (t === '/usuarios') {
       const lista = await listarUsuarios();
@@ -245,10 +260,12 @@ app.post('/webhook', (req, res) => {
   if (remoteJid.endsWith('@g.us')) return;
   const numero = remoteJid.split('@')[0];
 
+  const imagem = dados.message?.imageMessage || null;
+  const messageId = dados.key?.id || null;
   const texto =
     dados.message?.conversation ||
     dados.message?.extendedTextMessage?.text ||
-    null;
+    (imagem ? imagem.caption || '[imagem]' : null);
   if (!texto) return;
 
   enfileirar(numero, async () => {
@@ -258,7 +275,7 @@ app.post('/webhook', (req, res) => {
       return;
     }
 
-    console.log(`Msg de ${usuario.nome || numero}: ${texto.slice(0, 60)}`);
+    console.log(`Msg de ${usuario.nome || numero}: ${imagem ? '[imagem] ' : ''}${texto.slice(0, 60)}`);
 
     const respostaComando = await tratarComando(usuario, texto);
     if (respostaComando) {
@@ -266,12 +283,21 @@ app.post('/webhook', (req, res) => {
       return;
     }
 
+    // Se veio imagem, baixa em base64 para o Doutor "ver".
+    let anexo = null;
+    if (imagem && messageId) {
+      const midia = await baixarMidiaBase64(messageId);
+      if (midia?.base64 && (midia.mimetype || '').startsWith('image/')) {
+        anexo = { media_type: midia.mimetype, data: midia.base64 };
+      }
+    }
+
     const totalMensagens = await contarMensagens(usuario.id);
     await salvarMensagem(usuario.id, 'user', texto);
     const historico = await buscarHistorico(usuario.id, 30);
     let resposta;
     try {
-      resposta = await responder(usuario, historico, totalMensagens);
+      resposta = await responder(usuario, historico, totalMensagens, anexo);
     } catch (e) {
       console.error('Falha ao gerar resposta:', e?.message || e);
       await enviarMensagem(
@@ -350,5 +376,29 @@ if (CRON_CUSTO !== 'off') {
   console.log(`Tarefa "Relatório de custo" agendada: ${CRON_CUSTO}`);
 }
 
+// 🎂 Aniversários: todo dia no horário configurado, parabeniza quem faz aniversário.
+const CRON_ANIVERSARIO = process.env.CRON_ANIVERSARIO || '0 9 * * *';
+if (CRON_ANIVERSARIO !== 'off') {
+  cron.schedule(
+    CRON_ANIVERSARIO,
+    async () => {
+      try {
+        const lista = await aniversariantesDeHoje();
+        if (lista.length === 0) return;
+        console.log(`🎂 Aniversariantes hoje: ${lista.map((a) => a.nome || a.numero).join(', ')}`);
+        for (const a of lista) {
+          const msg = await gerarParabens(a.nome || 'amigo');
+          await enviarMensagem(a.numero, msg);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      } catch (e) {
+        console.error('Erro na tarefa de aniversários:', e);
+      }
+    },
+    { timezone: 'America/Sao_Paulo' }
+  );
+  console.log(`Tarefa "Aniversários" agendada: ${CRON_ANIVERSARIO}`);
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sócrates v4.6.0 rodando na porta ${PORT} ⚽`));
+app.listen(PORT, () => console.log(`Sócrates v4.7.0 rodando na porta ${PORT} ⚽`));

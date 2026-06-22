@@ -66,6 +66,19 @@ export async function atualizarUsuario(id, campos) {
   await supabase.from('socrates_usuarios').update(campos).eq('id', id);
 }
 
+// Aniversariantes de hoje (campo aniversario no formato MM-DD).
+export async function aniversariantesDeHoje() {
+  const [dd, mm] = new Date()
+    .toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit' })
+    .split('/');
+  const mmdd = `${mm}-${dd}`;
+  const { data } = await supabase
+    .from('socrates_usuarios')
+    .select('id, numero, nome')
+    .eq('aniversario', mmdd);
+  return data || [];
+}
+
 // ===================== MENSAGENS =====================
 export async function salvarMensagem(usuarioId, papel, conteudo) {
   await supabase
