@@ -51,3 +51,22 @@ export async function enviarMensagem(numero, texto) {
     console.error('Falha ao enviar mensagem:', e.message);
   }
 }
+
+// Envia uma mensagem de voz (PTT). A Evolution transcodifica para opus quando encoding=true.
+export async function enviarAudio(numero, base64) {
+  try {
+    const res = await fetch(`${EVOLUTION_URL}/message/sendWhatsAppAudio/${INSTANCE}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: EVOLUTION_APIKEY },
+      body: JSON.stringify({ number: numero, audio: base64, encoding: true }),
+    });
+    if (!res.ok) {
+      console.error('Erro Evolution (áudio):', res.status, await res.text());
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('Falha ao enviar áudio:', e.message);
+    return false;
+  }
+}

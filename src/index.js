@@ -54,8 +54,8 @@ import {
   perguntaAtiva,
   respostasDaPergunta,
 } from './dados.js';
-import { enviarMensagem, baixarMidiaBase64 } from './whatsapp.js';
-import { listarJogosCopa, mesmaSelecao } from './fontes.js';
+import { enviarMensagem, baixarMidiaBase64, enviarAudio } from './whatsapp.js';
+import { listarJogosCopa, mesmaSelecao, transcreverAudio, sintetizarVoz } from './fontes.js';
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -122,6 +122,14 @@ async function tratarComando(usuario, texto) {
     return 'Sem noticiário. Quando quiser saber do mundo, é só perguntar.';
   }
 
+  if (t === '/voz on' || t === '/voz off') {
+    const liga = t.endsWith('on');
+    await atualizarUsuario(usuario.id, { voz: liga });
+    return liga
+      ? '🔊 Fechado! Quando você me mandar áudio, eu te respondo em áudio também.'
+      : '🔇 Beleza, vou te responder só em texto.';
+  }
+
   // /palpite Brasil x Marrocos = 2x1   (bolão — canal coletivo)
   if (t.startsWith('/palpite ')) {
     const corpo = texto.trim().slice(9);
@@ -135,8 +143,7 @@ async function tratarComando(usuario, texto) {
   }
 
   // /ranking — placar do bolão (canal coletivo, todos podem ver)
-  if (t === '/ranking' || t === '/bolao' || t === '/bolão') {
-    const r = await rankingBolao();
+  if (t === '/ranking' || t === '/bolao' || t === '/bolão') {    const r = await rankingBolao();
     if (!r.length) return '🏆 O bolão ainda não tem pontos. Mandem seus palpites com /palpite que eu vou contabilizando quando os jogos acabarem!';
     const medalha = ['🥇', '🥈', '🥉'];
     const linhas = r.map((u, i) => `${medalha[i] || `${i + 1}.`} ${u.nome} — *${u.pontos}* pts (${u.jogos}j)`);
@@ -240,6 +247,7 @@ async function tratarComando(usuario, texto) {
       '🧠 /profundo — papo mais denso (/normal volta)\n' +
       '📰 /resenha on|off — minha Resenha da Copa (9h)\n' +
       '🌎 /noticias on|off — giro das notícias (8h)\n' +
+      '🔊 /voz on|off — responder seus áudios em áudio\n' +
       '🎯 /palpite Brasil x Marrocos = 2x1 — entra no bolão\n' +
       '🏆 /ranking — placar do bolão\n' +
       '⏰ "me lembra amanhã às 9h de..." — eu te aviso na hora\n' +
@@ -361,12 +369,13 @@ app.post('/webhook', (req, res) => {
   const numero = remoteJid.split('@')[0];
 
   const imagem = dados.message?.imageMessage || null;
+  const audio = dados.message?.audioMessage || null;
   const messageId = dados.key?.id || null;
-  const texto =
+  let texto =
     dados.message?.conversation ||
     dados.message?.extendedTextMessage?.text ||
     (imagem ? imagem.caption || '[imagem]' : null);
-  if (!texto) return;
+  if (!texto && !audio) return;
 
   enfileirar(numero, async () => {
     const usuario = await buscarUsuario(numero);
@@ -375,7 +384,24 @@ app.post('/webhook', (req, res) => {
       return;
     }
 
-    console.log(`Msg de ${usuario.nome || numero}: ${imagem ? '[imagem] ' : ''}${texto.slice(0, 60)}`);
+    // Se veio áudio, transcreve antes de tudo (Groq Whisper).
+    let veioAudio = false;
+    if (audio && messageId && !texto) {
+      const midia = await baixarMidiaBase64(messageId);
+      if (midia?.base64) {
+        const t = await transcreverAudio(midia.base64, midia.mimetype);
+        if (t) {
+          texto = t;
+          veioAudio = true;
+        }
+      }
+      if (!texto) {
+        await enviarMensagem(numero, '⚽ Opa, não consegui ouvir teu áudio direito. Manda de novo ou escreve aí que eu te respondo.');
+        return;
+      }
+    }
+
+    console.log(`Msg de ${usuario.nome || numero}: ${veioAudio ? '[áudio] ' : imagem ? '[imagem] ' : ''}${texto.slice(0, 60)}`);
 
     const respostaComando = await tratarComando(usuario, texto);
     if (respostaComando) {
@@ -408,6 +434,17 @@ app.post('/webhook', (req, res) => {
     }
     await salvarMensagem(usuario.id, 'assistant', resposta);
     await marcarConversa(usuario.id);
+
+    // Áudio entra → áudio sai (se a voz estiver ligada e a resposta não for longa demais).
+    const querVoz =
+      veioAudio && usuario.voz !== false && (process.env.TTS_ATIVO || 'off') === 'on';
+    const maxCharsVoz = Number(process.env.TTS_MAX_CHARS || 600);
+    if (querVoz && resposta.length <= maxCharsVoz) {
+      const audioBase64 = await sintetizarVoz(resposta);
+      if (audioBase64 && (await enviarAudio(numero, audioBase64))) {
+        return; // respondeu em voz; não repete em texto
+      }
+    }
     await enviarMensagem(numero, resposta);
   });
 });
@@ -790,4 +827,4 @@ if (CRON_SINTESE !== 'off') {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sócrates v4.11.0 rodando na porta ${PORT} ⚽`));
+app.listen(PORT, () => console.log(`Sócrates v4.12.0 rodando na porta ${PORT} ⚽`));

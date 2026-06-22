@@ -233,3 +233,53 @@ export async function executarFerramenta(nome, input) {
     return 'Não consegui consultar essa fonte agora.';
   }
 }
+
+// ===================== ÁUDIO: TRANSCRIÇÃO (Groq Whisper) =====================
+export async function transcreverAudio(base64, mimetype) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) return null;
+  try {
+    const buffer = Buffer.from(base64, 'base64');
+    const form = new FormData();
+    form.append('model', process.env.STT_MODELO || 'whisper-large-v3-turbo');
+    form.append('file', new Blob([buffer], { type: mimetype || 'audio/ogg' }), 'audio.ogg');
+    const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
+    });
+    if (!r.ok) {
+      console.error('Erro Groq STT:', r.status, await r.text());
+      return null;
+    }
+    const data = await r.json();
+    return (data.text || '').trim() || null;
+  } catch (e) {
+    console.error('Falha ao transcrever áudio:', e.message);
+    return null;
+  }
+}
+
+// ===================== ÁUDIO: VOZ (ElevenLabs TTS) =====================
+export async function sintetizarVoz(texto) {
+  const key = process.env.TTS_API_KEY;
+  const voice = process.env.TTS_VOICE_ID;
+  if (!key || !voice) return null;
+  const modelo = process.env.TTS_MODELO || 'eleven_turbo_v2_5';
+  try {
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}`, {
+      method: 'POST',
+      headers: { 'xi-api-key': key, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
+      body: JSON.stringify({ text: texto, model_id: modelo }),
+    });
+    if (!r.ok) {
+      console.error('Erro ElevenLabs TTS:', r.status, await r.text());
+      return null;
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    return buf.toString('base64');
+  } catch (e) {
+    console.error('Falha ao sintetizar voz:', e.message);
+    return null;
+  }
+}
